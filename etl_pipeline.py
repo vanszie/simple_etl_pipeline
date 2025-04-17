@@ -6,8 +6,10 @@ from datetime import datetime
 base_dir = "data"
 source_dir = f"{base_dir}/source"
 staging_dir = f"{base_dir}/staging"
+dwh_dir = f"{base_dir}/dwh"
 mart_dir = f"{base_dir}/mart"
 os.makedirs(staging_dir, exist_ok=True)
+os.makedirs(dwh_dir, exist_ok=True)
 os.makedirs(mart_dir, exist_ok=True)
 
 # Function to get file creation datetime
@@ -30,8 +32,8 @@ course_attendance_df = pd.read_csv(f"{source_dir}/course_attendance.csv")
 # --- RENAME ID BASE ON FILE NAME ---
 course_df.rename(columns={"ID": "COURSE_ID", "NAME": "COURSE_NAME"}, inplace=True)
 schedule_df.rename(columns={"ID": "SCHEDULE_ID"}, inplace=True)
-enrollment_df.rename(columns={"ID": "ENROLLMENT_ID"}, inplace=True)
-course_attendance_df.rename(columns={"ID": "ATTENDANCE_ID"}, inplace=True)
+enrollment_df.rename(columns={"ID": "ENROLLMENT_ID", "SEMESTER": "SEMESTER_ID"}, inplace=True)
+course_attendance_df.rename(columns={"ID": "COURSE_ATTENDANCE_ID"}, inplace=True)
 
 # --- Add file_creation_datetime from source file creation datetime in staging---
 course_df["file_creation_datetime"] = get_file_creation_datetime(course_path)
@@ -60,7 +62,7 @@ course_schedule = schedule_df.merge(course_df, on="COURSE_ID", how="left")
 enrollment_schedule = enrollment_df.merge(course_schedule, on="SCHEDULE_ID", how="left")
 enrollment_course_schedule = (
     enrollment_schedule
-    .groupby(["SEMESTER", "COURSE_NAME"])
+    .groupby(["SEMESTER_ID", "COURSE_NAME"])
     .agg(student_count=("STUDENT_ID", "nunique"))
     .reset_index()
 )
@@ -71,7 +73,7 @@ course_schedule["START_DT"] = pd.to_datetime(course_schedule["START_DT"])
 course_schedule["END_DT"] = pd.to_datetime(course_schedule["END_DT"])
 
 join_data = course_attendance_df.merge(course_schedule, on="SCHEDULE_ID", how="left")
-join_data = join_data.merge(enrollment_df[["STUDENT_ID", "SCHEDULE_ID", "ACADEMIC_YEAR", "SEMESTER", "ENROLL_DT"]],
+join_data = join_data.merge(enrollment_df[["ENROLLMENT_ID","STUDENT_ID", "SCHEDULE_ID", "ACADEMIC_YEAR", "SEMESTER_ID", "ENROLL_DT"]],
                             on=["STUDENT_ID", "SCHEDULE_ID"], how="left")
 
 join_data["WEEK_ID"] = (
@@ -80,17 +82,37 @@ join_data["WEEK_ID"] = (
 )
 join_data = join_data[join_data["WEEK_ID"].between(1, 13)]
 
+# --- Prepare fact_course_attendance_detail.csv ---
+fact_df = join_data[[
+    "COURSE_ATTENDANCE_ID",
+    "ENROLLMENT_ID",
+    "STUDENT_ID",
+    "COURSE_NAME",
+    "SEMESTER_ID",
+    "WEEK_ID",
+    "LECTURER_ID",
+    "START_DT",
+    "END_DT",
+    "ATTEND_DT",
+    "ACADEMIC_YEAR",
+    "ENROLL_DT"
+]].copy()
+
+
+# Save to CSV
+fact_df.to_csv(f"{dwh_dir}/fact_course_attendance_detail.csv", index=False)
+
 # --- Calculate Course Attendance ---
 attendance_summary = (
-    join_data.groupby(["SEMESTER", "WEEK_ID", "COURSE_NAME"])
+    fact_df.groupby(["SEMESTER_ID", "WEEK_ID", "COURSE_NAME"])
     .agg(ATT_COUNT=("STUDENT_ID", "nunique"))
     .reset_index()
 )
 
 attendance_summary = attendance_summary.merge(
     enrollment_course_schedule,
-    left_on=["SEMESTER", "COURSE_NAME"],
-    right_on=["SEMESTER", "COURSE_NAME"],
+    left_on=["SEMESTER_ID", "COURSE_NAME"],
+    right_on=["SEMESTER_ID", "COURSE_NAME"],
     how="left"
 )
 
@@ -99,9 +121,7 @@ attendance_summary["ATTENDANCE_PCT"] = round(
 )
 
 # --- Final formatting ---
-attendance_summary = attendance_summary.rename(columns={
-    "SEMESTER": "SEMESTER_ID"
-})[["SEMESTER_ID", "WEEK_ID", "COURSE_NAME", "ATTENDANCE_PCT"]]
+attendance_summary = attendance_summary[["SEMESTER_ID", "WEEK_ID", "COURSE_NAME", "ATTENDANCE_PCT"]]
 
 # --- Export to CSV ---
 output_path = f"{mart_dir}/weekly_course_attendance.csv"
